@@ -394,15 +394,7 @@ layout = html.Div([
                     label="Show full names",
                     value=False,
                     className="mt-3"
-                ),
-                html.Hr(),
-                html.Div([
-                    html.Span("🔴 ", style={'color': '#E74C3C'}),
-                    html.Small("Main SPbSU authors"),
-                    html.Br(),
-                    html.Span("🟢 ", style={'color': '#4ECDC4'}),
-                    html.Small("Collaborators")
-                ], className="small")
+                )
             ], className="p-3 mb-3",
                 style={'backgroundColor': 'white', 'borderRadius': '8px', 'border': '1px solid #e0e0e0'}),
             html.Div([
