@@ -345,7 +345,11 @@ def get_author_topics(author_id):
         """, conn, params=[author_id])
         topics = []
         for topics_str in df['topics']:
-            for t in topics_str.replace(';', ',').split(','):
+            # Темы хранятся по одной на публикацию; имя темы может содержать
+            # запятую ('Language, Discourse, Communication Strategies') — режем
+            # только по ';' (в именах тем не встречается), иначе одна тема
+            # раскалывается на фейковые части.
+            for t in topics_str.split(';'):
                 cleaned = t.strip()
                 if cleaned:
                     topics.append(cleaned)

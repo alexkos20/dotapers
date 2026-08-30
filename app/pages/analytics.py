@@ -49,7 +49,11 @@ def load_global_topics(_):
     topics = []
     for topics_str in df_pubs['topics'].dropna():
         if topics_str and isinstance(topics_str, str):
-            for t in topics_str.replace(';', ',').split(','):
+            # Темы хранятся по одной на публикацию; имя темы может содержать
+            # запятую ('Language, Discourse, Communication Strategies') — режем
+            # только по ';' (в именах тем не встречается), иначе одна тема
+            # раскалывается на фейковые части.
+            for t in topics_str.split(';'):
                 cleaned = t.strip()
                 if cleaned:
                     topics.append(cleaned)
