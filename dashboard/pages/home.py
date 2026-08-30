@@ -1,0 +1,347 @@
+import dash
+from dash import html, dcc, Input, Output, callback
+import dash_cytoscape as cyto
+import dash_bootstrap_components as dbc
+import pandas as pd
+import plotly.graph_objects as go
+import networkx as nx
+from collections import Counter
+from functools import lru_cache
+from utils import MAIN_AUTHORS, DB_PATH, logger, timeit
+from etl import get_connection
+
+# Регистрируем страницу
+dash.register_page(__name__, path='/', name='Сеть соавторства')
+
+# ===== СТИЛИ И ПАЛИТРА =====
+COLOR_PALETTE = [
+    '#FF3333', '#33CC33', '#3399FF', '#FF9933', '#9933CC',
+    '#FF33CC', '#33CCCC', '#CC3333', '#33CC99', '#CC9933',
+    '#993366', '#339966', '#CC3366', '#33CC66', '#FF6633',
+    '#6633CC', '#FF33FF', '#33FF33', '#FFCC33', '#33FFCC'
+]
+
+STYLESHEET = [
+    {
+        'selector': 'node',
+        'style': {
+            'width': 'data(node_size)',
+            'height': 'data(node_size)',
+            'background-color': 'data(color)',
+            'label': 'data(label)',
+            'font-size': '10px',
+            'font-weight': 'bold',
+            'text-valign': 'center',
+            'text-halign': 'center',
+            'color': '#FFFFFF',
+            'text-outline-width': 1,
+            'text-outline-color': '#333333',
+            'border-width': 2,
+            'border-color': '#FFFFFF'
+        }
+    },
+    {
+        'selector': 'edge',
+        'style': {
+            'width': 1.0,
+            'line-color': '#9a9b9c',
+            'curve-style': 'bezier',
+            'opacity': 0.6
+        }
+    }
+]
+
+# ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
+@lru_cache(maxsize=1)
+@timeit
+def load_data_from_db():
+    with get_connection() as conn:
+        df_pubs = pd.read_sql("SELECT * FROM publications", conn)
+        df_auth = pd.read_sql("SELECT * FROM authorship", conn)
+    logger.info(f"Загружено {len(df_pubs)} публикаций из БД")
+    return df_pubs, df_auth
+
+@lru_cache(maxsize=32)
+@timeit
+def build_graph(min_pubs=1, min_cites=0):
+    df_pubs, df_auth = load_data_from_db()
+
+    if df_pubs.empty:
+        logger.warning("Нет данных для построения графа")
+        return nx.Graph()
+
+    # Собираем словарь author_id -> author_name
+    author_names = {}
+    with get_connection() as conn:
+        df_authors = pd.read_sql("SELECT id, name FROM authors", conn)
+        author_names = dict(zip(df_authors['id'], df_authors['name']))
+
+    G = nx.Graph()
+
+    for _, pub in df_pubs.iterrows():
+        pub_id = pub['id']
+        cited_by = pub['cited_by_count']
+
+        authors_in_pub = df_auth[df_auth['publication_id'] == pub_id]['author_id'].tolist()
+        author_names_list = [author_names.get(aid, aid) for aid in authors_in_pub if aid in author_names]
+
+        for author_name in author_names_list:
+            if author_name not in G:
+                G.add_node(author_name,
+                           publications=0,
+                           total_citations=0,
+                           is_main_author=author_name in MAIN_AUTHORS)
+            G.nodes[author_name]['publications'] += 1
+            G.nodes[author_name]['total_citations'] += cited_by
+
+        for i, a1 in enumerate(author_names_list):
+            for a2 in author_names_list[i + 1:]:
+                if G.has_edge(a1, a2):
+                    G[a1][a2]['weight'] += 1
+                else:
+                    G.add_edge(a1, a2, weight=1)
+
+    if min_pubs > 1 or min_cites > 0:
+        nodes_to_keep = [
+            node for node, data in G.nodes(data=True)
+            if data.get('publications', 0) >= min_pubs and data.get('total_citations', 0) >= min_cites
+        ]
+        G = G.subgraph(nodes_to_keep).copy()
+
+    logger.info(f"Граф построен: {G.number_of_nodes()} узлов, {G.number_of_edges()} рёбер")
+    return G
+
+def graph_to_cytoscape_elements(G):
+    """Преобразует NetworkX-граф в формат для Cytoscape."""
+    if G.number_of_nodes() == 0:
+        return [], []
+
+    nodes = []
+    edges = []
+
+    color_idx = 0
+    node_colors = {}
+
+    for node in G.nodes():
+        is_main = G.nodes[node].get('is_main_author', False)
+
+        if is_main:
+            node_color = '#E74C3C'
+        else:
+            if node not in node_colors:
+                node_colors[node] = COLOR_PALETTE[color_idx % len(COLOR_PALETTE)]
+                color_idx += 1
+            node_color = node_colors[node]
+
+        pubs = G.nodes[node].get('publications', 1)
+        node_size = 20 + min(pubs, 30)
+        label = node.split()[-1] if len(node.split()) > 1 else node
+
+        nodes.append({
+            'data': {
+                'id': node,
+                'label': label,
+                'full_name': node,
+                'author_id': node,
+                'publications': pubs,
+                'citations': G.nodes[node].get('total_citations', 0),
+                'is_main_author': is_main,
+                'node_size': node_size,
+                'color': node_color
+            }
+        })
+
+    for u, v, data in G.edges(data=True):
+        edges.append({
+            'data': {
+                'source': u,
+                'target': v,
+                'weight': data.get('weight', 1)
+            }
+        })
+
+    return nodes, edges
+
+# ===== LAYOUT СТРАНИЦЫ (ТОЛЬКО ОДИН РАЗ!) =====
+layout = html.Div([
+    html.H1("📊 SPBU Research Collaboration Network", className="text-center mt-4"),
+    html.P("Co-authorship network and research topics", className="text-center text-muted mb-4"),
+    html.Hr(),
+    dbc.Row([
+        dbc.Col([
+            html.Div([
+                html.H5("🔬 Co-authorship Network", className="mb-3"),
+                cyto.Cytoscape(
+                    id='coauthorship-graph',
+                    elements=[],
+                    stylesheet=STYLESHEET,
+                    layout={
+                        'name': 'cose',
+                        'idealEdgeLength': 120,
+                        'nodeOverlap': 25,
+                        'fit': True,
+                        'padding': 40,
+                        'nodeRepulsion': 400000,
+                        'gravity': 80
+                    },
+                    style={'width': '100%', 'height': '600px', 'border': '1px solid #e0e0e0', 'borderRadius': '8px'},
+                    minZoom=0.2,
+                    maxZoom=2,
+                    zoomingEnabled=True,
+                    userZoomingEnabled=True,
+                    panningEnabled=True,
+                    userPanningEnabled=True
+                ),
+                html.Div(
+                    html.Small("💡 Click nodes for details | Drag to rearrange", className="text-muted"),
+                    className="text-center mt-3"
+                )
+            ])
+        ], width=8),
+        dbc.Col([
+            html.Div([
+                html.H6("🎛️ Filters", className="mb-3"),
+                html.Label("Min Publications:", className="small"),
+                dcc.Slider(
+                    id='min-pubs-slider',
+                    min=1, max=20, step=1, value=1,
+                    marks={i: str(i) for i in [1, 5, 10, 15, 20]}
+                ),
+                html.Label("Min Citations:", className="small mt-3"),
+                dcc.Slider(
+                    id='min-cites-slider',
+                    min=0, max=100, step=1, value=0,
+                    marks={0: '0', 50: '50', 100: '100'}
+                ),
+                dbc.Checkbox(
+                    id='show-labels',
+                    label="Show full names",
+                    value=False,
+                    className="mt-3"
+                ),
+                html.Hr(),
+                html.Div([
+                    html.Span("🔴 ", style={'color': '#E74C3C'}),
+                    html.Small("Main SPbSU authors"),
+                    html.Br(),
+                    html.Span("🟢 ", style={'color': '#4ECDC4'}),
+                    html.Small("Collaborators")
+                ], className="small")
+            ], className="p-3 mb-3",
+                style={'backgroundColor': 'white', 'borderRadius': '8px', 'border': '1px solid #e0e0e0'}),
+            html.Div([
+                html.H6("📌 Author Info", className="mb-3"),
+                html.Div(id="node-info", children=[
+                    html.Div("Click on any node", className="text-center text-muted py-4")
+                ], style={'maxHeight': '350px', 'overflowY': 'auto'})
+            ], className="p-3 mb-3",
+                style={'backgroundColor': 'white', 'borderRadius': '8px', 'border': '1px solid #e0e0e0'}),
+            html.Div([
+                html.H6("📊 Statistics", className="mb-3"),
+                dbc.Row([
+                    dbc.Col(html.Div([
+                        html.Div("📚", style={'fontSize': '20px'}),
+                        html.Div("0", id='stat-papers', style={'fontSize': '24px', 'fontWeight': 'bold'}),
+                        html.Div("Papers", className="small text-muted")
+                    ], className="text-center p-2"), width=6),
+                    dbc.Col(html.Div([
+                        html.Div("👥", style={'fontSize': '20px'}),
+                        html.Div("0", id='stat-authors', style={'fontSize': '24px', 'fontWeight': 'bold'}),
+                        html.Div("Authors", className="small text-muted")
+                    ], className="text-center p-2"), width=6),
+                ]),
+                dbc.Row([
+                    dbc.Col(html.Div([
+                        html.Div("🔗", style={'fontSize': '20px'}),
+                        html.Div("0", id='stat-edges', style={'fontSize': '24px', 'fontWeight': 'bold'}),
+                        html.Div("Connections", className="small text-muted")
+                    ], className="text-center p-2"), width=6),
+                    dbc.Col(html.Div([
+                        html.Div("📖", style={'fontSize': '20px'}),
+                        html.Div("0", id='stat-citations', style={'fontSize': '20px', 'fontWeight': 'bold'}),
+                        html.Div("Citations", className="small text-muted")
+                    ], className="text-center p-2"), width=6),
+                ]),
+            ], className="p-3",
+                style={'backgroundColor': 'white', 'borderRadius': '8px', 'border': '1px solid #e0e0e0'})
+        ], width=4)
+    ], className="mb-4"),
+    # dbc.Row([
+    #     dbc.Col([
+    #         html.Div([
+    #             html.H6("🏷️ Top Research Topics", className="mb-3"),
+    #             dcc.Graph(id='topics-chart', config={'displayModeBar': False})
+    #         ], className="p-3",
+    #             style={'backgroundColor': 'white', 'borderRadius': '8px', 'border': '1px solid #e0e0e0'})
+    #     ], width=6),
+    #     dbc.Col([
+    #         html.Div([
+    #             html.H6("📈 Publication Trends", className="mb-3"),
+    #             dcc.Graph(id='yearly-trend', config={'displayModeBar': False})
+    #         ], className="p-3",
+    #             style={'backgroundColor': 'white', 'borderRadius': '8px', 'border': '1px solid #e0e0e0'})
+    #     ], width=6),
+    # ])
+])
+
+# ===== CALLBACKS =====
+@callback(
+    [Output('coauthorship-graph', 'elements'),
+     Output('stat-papers', 'children'),
+     Output('stat-authors', 'children'),
+     Output('stat-edges', 'children'),
+     Output('stat-citations', 'children')],
+    [Input('min-pubs-slider', 'value'),
+     Input('min-cites-slider', 'value')]
+)
+@timeit
+def update_graph(min_pubs, min_cites):
+    logger.info(f"Обновление графа: min_pubs={min_pubs}, min_cites={min_cites}")
+    G = build_graph(min_pubs, min_cites)
+    nodes, edges = graph_to_cytoscape_elements(G)
+
+    total_papers = sum(G.nodes[node].get('publications', 0) for node in G.nodes())
+    total_citations = sum(G.nodes[node].get('total_citations', 0) for node in G.nodes())
+
+    return (
+        nodes + edges,
+        str(total_papers),
+        str(G.number_of_nodes()),
+        str(G.number_of_edges()),
+        f"{total_citations:,}"
+    )
+
+@callback(
+    [Output("coauthorship-graph", "stylesheet")],
+    [Input("show-labels", "value")]
+)
+def update_labels(show_labels):
+    updated_stylesheet = STYLESHEET.copy()
+    for style in updated_stylesheet:
+        if style.get('selector') == 'node':
+            if show_labels:
+                style['style']['label'] = 'data(full_name)'
+                style['style']['font-size'] = '8px'
+            else:
+                style['style']['label'] = 'data(label)'
+                style['style']['font-size'] = '10px'
+    return [updated_stylesheet]
+
+@callback(
+    Output("node-info", "children"),
+    Input("coauthorship-graph", "selectedNodeData")
+)
+def display_node_info(selected_nodes):
+    if not selected_nodes:
+        return "Click on any node"
+    node = selected_nodes[0]
+    author_id = node.get('author_id', '')
+    return html.Div([
+        html.H6(node.get('full_name', 'Unknown')),
+        html.Div(f"Publications: {node.get('publications', 0)}"),
+        html.Div(f"Citations: {node.get('citations', 0)}"),
+        html.Br(),
+        dbc.Button("Открыть профиль", color="primary", size="sm",
+                   href=f"/author/{author_id}" if author_id else "#"),
+    ])
+

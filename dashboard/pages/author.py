@@ -1,0 +1,120 @@
+import dash
+from dash import html, dcc, callback, Input, Output
+import dash_bootstrap_components as dbc
+import plotly.graph_objects as go
+from utils import logger
+from etl import (
+    get_author_stats, get_author_publications,
+    get_author_coauthors, get_author_topics
+)
+
+dash.register_page(__name__, path='/author/<author_id>', name='Профиль автора')
+
+def layout(author_id=None):
+    """Функция layout получает author_id из URL."""
+    return html.Div([
+        html.Div(id='author-profile-container', children=[
+            html.P("Загрузка данных...", className="text-muted")
+        ])
+    ])
+
+@callback(
+    Output('author-profile-container', 'children'),
+    Input('url', 'pathname')
+)
+def load_author_profile(pathname):
+    print("Callback вызван! pathname =", pathname)
+    if not pathname or not pathname.startswith('/author/'):
+        return html.Div("Автор не указан", className="text-warning")
+    author_id = pathname.split('/')[-1]
+    if not author_id:
+        return html.Div("Некорректный идентификатор", className="text-danger")
+
+    # Загружаем данные
+    try:
+        pub_count, citations, coauthors_count = get_author_stats(author_id)
+        publications = get_author_publications(author_id)
+        coauthors = get_author_coauthors(author_id)
+        topics = get_author_topics(author_id)
+    except Exception as e:
+        logger.error(f"Ошибка загрузки профиля {author_id}: {e}")
+        return html.Div("Ошибка загрузки данных", className="text-danger")
+
+    # Строим карточку
+    card = dbc.Card([
+        dbc.CardBody([
+            html.H4(f"👤 {author_id}", className="card-title"),
+            html.Hr(),
+            dbc.Row([
+                dbc.Col(html.Div([
+                    html.Div("📄", style={'fontSize': '20px'}),
+                    html.Div(str(pub_count), style={'fontSize': '24px', 'fontWeight': 'bold'}),
+                    html.Div("Публикаций", className="small text-muted")
+                ], className="text-center"), width=3),
+                dbc.Col(html.Div([
+                    html.Div("📊", style={'fontSize': '20px'}),
+                    html.Div(f"{citations:,}", style={'fontSize': '24px', 'fontWeight': 'bold'}),
+                    html.Div("Цитирований", className="small text-muted")
+                ], className="text-center"), width=3),
+                dbc.Col(html.Div([
+                    html.Div("👥", style={'fontSize': '20px'}),
+                    html.Div(str(coauthors_count), style={'fontSize': '24px', 'fontWeight': 'bold'}),
+                    html.Div("Соавторов", className="small text-muted")
+                ], className="text-center"), width=3),
+                dbc.Col(html.Div([
+                    html.Div("📈", style={'fontSize': '20px'}),
+                    html.Div("—", style={'fontSize': '24px', 'fontWeight': 'bold'}),
+                    html.Div("H‑индекс", className="small text-muted")
+                ], className="text-center"), width=3),
+            ])
+        ])
+    ], className="mb-4")
+
+    # Список публикаций
+    pubs_list = []
+    if publications:
+        for pub in publications[:20]:  # покажем последние 20
+            pubs_list.append(html.Li([
+                html.A(pub['title'], href=pub['id'], target="_blank") if pub['id'].startswith('http') else html.Span(pub['title']),
+                html.Span(f" ({pub.get('publication_year', 'н/д')})", className="text-muted"),
+                html.Span(f" | Цит.: {pub.get('cited_by_count', 0)}", className="small text-muted")
+            ]))
+    else:
+        pubs_list.append(html.Li("Публикаций не найдено"))
+
+    # Список соавторов
+    coauthors_list = []
+    if coauthors:
+        for ca in coauthors[:20]:
+            coauthors_list.append(html.Li([
+                html.A(ca['name'], href=f"/author/{ca['id']}"),
+                html.Span(f" ({ca['joint_works']} совместных работ)", className="small text-muted")
+            ]))
+    else:
+        coauthors_list.append(html.Li("Соавторов не найдено"))
+
+    # Темы
+    topics_list = []
+    if topics:
+        for topic, count in topics:
+            topics_list.append(html.Li(f"{topic} ({count})"))
+    else:
+        topics_list.append(html.Li("Тем не найдено"))
+
+    # Собираем страницу
+    return html.Div([
+        card,
+        dbc.Row([
+            dbc.Col([
+                html.H5("📚 Публикации"),
+                html.Ul(pubs_list, className="list-unstyled")
+            ], width=7),
+            dbc.Col([
+                html.H5("🤝 Соавторы"),
+                html.Ul(coauthors_list, className="list-unstyled"),
+                html.Hr(),
+                html.H5("🏷️ Основные темы"),
+                html.Ul(topics_list, className="list-unstyled")
+            ], width=5)
+        ])
+    ])
