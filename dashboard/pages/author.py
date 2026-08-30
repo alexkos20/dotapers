@@ -28,7 +28,12 @@ def layout(author_id=None, **kwargs):
     author_name = get_author_name(author_id)
     card = dbc.Card([
         dbc.CardBody([
-            html.H4(f"👤 {author_name}", className="card-title"),
+            html.H4([
+                f"👤 {author_name}",
+                html.A("🔗", href=author_id, target="_blank",
+                       title="Открыть профиль в OpenAlex",
+                       className="text-decoration-none ms-2"),
+            ], className="card-title"),
             html.Hr(),
             dbc.Row([
                 dbc.Col(html.Div([
