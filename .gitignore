@@ -1,10 +1,38 @@
-# Python
+# ===== Python =====
 __pycache__/
 *.py[cod]
+*.egg-info/
+build/
+dist/
 
-# Виртуальное окружение
+# ===== Виртуальное окружение =====
 .venv/
+venv/
+env/
 
-# Рантайм-артефакты дашборда
+# ===== Jupyter =====
+.ipynb_checkpoints/
+
+# ===== Рантайм-артефакты дашборда =====
 *.log
 *.db
+
+# ===== Переменные окружения / секреты =====
+.env
+.env.*
+!.env.example
+
+# ===== Кэши инструментов =====
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ===== IDE / редакторы =====
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ===== ОС =====
+.DS_Store
+Thumbs.db
