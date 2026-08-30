@@ -73,7 +73,7 @@ GRAPH_CACHE_FILE = Path(__file__).resolve().parent.parent / 'graph_cache.pkl'
 
 # Версия структуры закэшированного графа. Увеличивать при изменении
 # графа/раскладки в коде — старый graph_cache.pkl станет невалидным.
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 
 def _db_state_key():
     """Хэш состояния БД + версии кода — меняется после ETL или правок построителя."""
@@ -150,7 +150,11 @@ def _build_full_graph():
     # Детерминированная раскладка. Считается один раз и сохраняется вместе с
     # графом в дисковом кэше; клиент расставляет узлы по preset (без повторного
     # запуска cose-layout при каждом открытии страницы).
-    pos = nx.spring_layout(G, seed=42, iterations=30)
+    # k = идеальная длина ребра. Увеличиваем относительно дефолта (1/sqrt(n)),
+    # чтобы узлы были растащены друг от друга дальше.
+    n_nodes = G.number_of_nodes()
+    k = 2.5 / n_nodes ** 0.5 if n_nodes else 1.0
+    pos = nx.spring_layout(G, seed=42, iterations=30, k=k)
     for n in G.nodes():
         G.nodes[n]['pos'] = {'x': float(pos[n][0]) * 150, 'y': float(pos[n][1]) * 150}
 
