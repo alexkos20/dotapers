@@ -71,14 +71,18 @@ def load_data_from_db():
 # поэтому после ETL кэш автоматически пересоздаётся.
 GRAPH_CACHE_FILE = Path(__file__).resolve().parent.parent / 'graph_cache.pkl'
 
+# Версия структуры закэшированного графа. Увеличивать при изменении
+# графа/раскладки в коде — старый graph_cache.pkl станет невалидным.
+CACHE_VERSION = 2
+
 def _db_state_key():
-    """Хэш состояния БД — меняется после ETL, инвалидирует кэш."""
+    """Хэш состояния БД + версии кода — меняется после ETL или правок построителя."""
     with get_connection() as conn:
         pubs = pd.read_sql("SELECT COUNT(*) FROM publications", conn).iloc[0, 0]
         authors = pd.read_sql("SELECT COUNT(*) FROM authors", conn).iloc[0, 0]
         meta = pd.read_sql("SELECT value FROM etl_metadata WHERE key = 'last_etl_run'", conn)
         last = meta.iloc[0, 0] if not meta.empty else ''
-    return hashlib.md5(f"{pubs}:{authors}:{last}".encode()).hexdigest()
+    return hashlib.md5(f"{CACHE_VERSION}:{pubs}:{authors}:{last}".encode()).hexdigest()
 
 def _load_graph_from_disk(key):
     if not GRAPH_CACHE_FILE.exists():
@@ -143,6 +147,13 @@ def _build_full_graph():
                 else:
                     G.add_edge(a1, a2, weight=1)
 
+    # Детерминированная раскладка. Считается один раз и сохраняется вместе с
+    # графом в дисковом кэше; клиент расставляет узлы по preset (без повторного
+    # запуска cose-layout при каждом открытии страницы).
+    pos = nx.spring_layout(G, seed=42, iterations=30)
+    for n in G.nodes():
+        G.nodes[n]['pos'] = {'x': float(pos[n][0]) * 150, 'y': float(pos[n][1]) * 150}
+
     return G
 
 @lru_cache(maxsize=8)
@@ -206,6 +217,7 @@ def graph_to_cytoscape_elements(G):
         label = node.split()[-1] if len(node.split()) > 1 else node
 
         nodes.append({
+            'position': G.nodes[node].get('pos', {}),
             'data': {
                 'id': node,
                 'label': label,
@@ -244,13 +256,10 @@ layout = html.Div([
                     elements=[],
                     stylesheet=STYLESHEET,
                     layout={
-                        'name': 'cose',
-                        'idealEdgeLength': 120,
-                        'nodeOverlap': 25,
+                        'name': 'preset',
                         'fit': True,
                         'padding': 40,
-                        'nodeRepulsion': 400000,
-                        'gravity': 80
+                        'zoom': 1,
                     },
                     style={'width': '100%', 'height': '600px', 'border': '1px solid #e0e0e0', 'borderRadius': '8px'},
                     minZoom=0.2,
