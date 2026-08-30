@@ -76,8 +76,14 @@ GRAPH_CACHE_FILE = Path(__file__).resolve().parent.parent / 'graph_cache.pkl'
 # графа/раскладки в коде — старый graph_cache.pkl станет невалидным.
 CACHE_VERSION = 5
 
+@lru_cache(maxsize=1)
 def _db_state_key():
-    """Хэш состояния БД + версии кода — меняется после ETL или правок построителя."""
+    """Хэш состояния БД + версии кода — меняется после ETL или правок построителя.
+
+    Кэшируется: build_graph вызывает этот ключ при каждом движении слайдера,
+    а состояние БД в процессе приложения не меняется (ETL запускается отдельно).
+    Сброс — в clear_graph_cache() после ETL.
+    """
     with get_connection() as conn:
         pubs = pd.read_sql("SELECT COUNT(*) FROM publications", conn).iloc[0, 0]
         authors = pd.read_sql("SELECT COUNT(*) FROM authors", conn).iloc[0, 0]
@@ -283,6 +289,7 @@ def clear_graph_cache():
     """Сброс кэша графа (память + диск). Вызывается после ETL."""
     _cached_full_graph.cache_clear()
     load_data_from_db.cache_clear()
+    _db_state_key.cache_clear()
     try:
         GRAPH_CACHE_FILE.unlink(missing_ok=True)
         logger.info("Дисковый кэш графа удалён")
