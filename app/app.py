@@ -4,6 +4,7 @@ import dash
 from dash import html, page_container
 import dash_bootstrap_components as dbc
 from utils import logger
+from etl import ensure_data
 
 app = dash.Dash(__name__, use_pages=True, external_stylesheets=[dbc.themes.FLATLY])
 server = app.server
@@ -34,6 +35,15 @@ if __name__ == '__main__':
     # debug включается через DASH_DEBUG=1; по умолчанию выключен,
     # чтобы не было reloader-процессов, удерживающих порт.
     # host=0.0.0.0 — чтобы порт был доступен снаружи (в т.ч. из Docker).
+    #
+    # Авто-загрузка данных: если pure_data.db пуст/отсутствует — ETL запустится
+    # сам (нужен интернет). Отключить можно AUTO_ETL=0 (используется start.sh --no-etl).
+    if os.environ.get('AUTO_ETL', '1').lower() not in ('0', 'false', 'no'):
+        try:
+            ensure_data()
+        except Exception as e:
+            logger.error(f"Автозагрузка данных не удалась: {e}")
+
     debug = os.environ.get('DASH_DEBUG', '0').lower() in ('1', 'true', 'yes')
     logger.info("Зарегистрированные страницы: %s", sorted(dash.page_registry.keys()))
     app.run(host='0.0.0.0', port=8050, debug=debug)
