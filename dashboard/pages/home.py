@@ -1,4 +1,5 @@
 import hashlib
+import math
 import pickle
 from pathlib import Path
 
@@ -73,7 +74,7 @@ GRAPH_CACHE_FILE = Path(__file__).resolve().parent.parent / 'graph_cache.pkl'
 
 # Версия структуры закэшированного графа. Увеличивать при изменении
 # графа/раскладки в коде — старый graph_cache.pkl станет невалидным.
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 
 def _db_state_key():
     """Хэш состояния БД + версии кода — меняется после ETL или правок построителя."""
@@ -150,15 +151,53 @@ def _build_full_graph():
     # Детерминированная раскладка. Считается один раз и сохраняется вместе с
     # графом в дисковом кэше; клиент расставляет узлы по preset (без повторного
     # запуска cose-layout при каждом открытии страницы).
-    # k = идеальная длина ребра. Увеличиваем относительно дефолта (1/sqrt(n)),
-    # чтобы узлы были растащены друг от друга дальше.
+    # k = идеальная длина ребра. 7.5/sqrt(n) — в 3 раза больше прежнего (2.5),
+    # плюс финальный проход _push_apart_overlaps убирает перекрытия кругов узлов,
+    # которые обычный force-directed layout не устраняет.
     n_nodes = G.number_of_nodes()
-    k = 2.5 / n_nodes ** 0.5 if n_nodes else 1.0
+    if n_nodes == 0:
+        return G
+    k = 7.5 / n_nodes ** 0.5
     pos = nx.spring_layout(G, seed=42, iterations=30, k=k)
+    positions = {n: [float(pos[n][0]) * 150, float(pos[n][1]) * 150] for n in G.nodes()}
+    _push_apart_overlaps(G, positions)
     for n in G.nodes():
-        G.nodes[n]['pos'] = {'x': float(pos[n][0]) * 150, 'y': float(pos[n][1]) * 150}
+        G.nodes[n]['pos'] = {'x': positions[n][0], 'y': positions[n][1]}
 
     return G
+
+
+def _node_radius(G, node):
+    """Радиус круга узла (пиксели): совпадает с node_size/2 в cytoscape."""
+    pubs = G.nodes[node].get('publications', 1)
+    return (20 + min(pubs, 30)) / 2
+
+
+def _push_apart_overlaps(G, positions, gap_factor=2.5, max_iter=60):
+    """Расталкивает пары узлов ближе, чем (r1+r2)*gap_factor. Детерминировано,
+    работает в пиксельных координатах. Итерации сходятся быстро — обычно < 10."""
+    nodes = list(G.nodes())
+    for _ in range(max_iter):
+        total_move = 0.0
+        for i, a in enumerate(nodes):
+            ra = _node_radius(G, a)
+            for b in nodes[i + 1:]:
+                rb = _node_radius(G, b)
+                min_d = (ra + rb) * gap_factor
+                dx = positions[b][0] - positions[a][0]
+                dy = positions[b][1] - positions[a][1]
+                d = math.hypot(dx, dy)
+                if 0 < d < min_d:
+                    push = (min_d - d) / 2
+                    ux, uy = dx / d, dy / d
+                    positions[a][0] -= ux * push
+                    positions[a][1] -= uy * push
+                    positions[b][0] += ux * push
+                    positions[b][1] += uy * push
+                    total_move += push
+        if total_move < 0.05:
+            break
+
 
 @lru_cache(maxsize=8)
 def _cached_full_graph(key):
