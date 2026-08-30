@@ -8,5 +8,5 @@ services:
       DASH_DEBUG: "0"
     volumes:
       # Код + БД живут на хосте: pure_data.db не пропадает при пересборке
-      - ./dashboard:/app/dashboard
+      - ./app:/app/app
     restart: unless-stopped

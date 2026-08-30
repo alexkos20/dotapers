@@ -39,7 +39,7 @@ done
 # Шаг 1: ETL (если нужен)
 if [ "$NO_ETL" -eq 0 ]; then
     echo "=== [1/2] Запуск ETL (загрузка данных из OpenAlex) ==="
-    ( cd dashboard && "$OLDPWD/$PY" etl.py --once )
+    ( cd app && "$OLDPWD/$PY" etl.py --once )
     echo "=== ETL завершён ==="
 fi
 
@@ -50,4 +50,4 @@ fi
 
 # Шаг 2: запуск дашборда
 echo "=== [2/2] Запуск дашборда на http://localhost:8050 ==="
-( cd dashboard && "$OLDPWD/$PY" app.py )
+( cd app && "$OLDPWD/$PY" app.py )
