@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import time
+from pathlib import Path
 from logging.handlers import RotatingFileHandler
 from functools import wraps
 
@@ -14,6 +15,9 @@ BASE_URL = "https://api.openalex.org"
 DB_PATH = "pure_data.db"
 LOG_PATH = "app.log"
 CACHE_SIZE = 128
+
+# Единый путь к дисковому кэшу графа (используется и построителем, и ETL для сброса)
+GRAPH_CACHE_FILE = Path(__file__).resolve().parent / 'graph_cache.pkl'
 
 def setup_logging():
     logger = logging.getLogger()
@@ -53,10 +57,22 @@ def compute_hash(work):
     return hashlib.md5(json_str.encode()).hexdigest()
 
 def clear_all_caches():
+    # Дисковый кэш графа чистим в первую очередь: это работает и вне контекста
+    # Dash (например, при standalone-запуске etl.py --once). Раньше сброс делался
+    # только через pages.home, что не работало в отдельном процессе ETL.
+    try:
+        GRAPH_CACHE_FILE.unlink(missing_ok=True)
+        logger.info("Дисковый кэш графа удалён")
+    except Exception as e:
+        logger.warning(f"Не удалось удалить дисковый кэш графа: {e}")
+
     try:
         from pages.home import clear_graph_cache
         clear_graph_cache()
-        logger.info("Все кэши очищены")
+        logger.info("In-memory кэши очищены")
     except Exception:
-        # вне контекста приложения (например, отдельный процесс ETL)
-        logger.warning("Не удалось очистить кэш (возможно, app ещё не загружен)")
+        # вне контекста приложения (например, отдельный процесс ETL):
+        # in-memory кэш запущенного приложения очистить нельзя, но после фикса
+        # _db_state_key() это и не нужно — приложение само заметит новые данные
+        # по mtime файла БД.
+        logger.warning("In-memory кэш не очищен (app ещё не загружен) — не критично")

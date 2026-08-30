@@ -12,7 +12,7 @@ import plotly.graph_objects as go
 import networkx as nx
 from collections import Counter
 from functools import lru_cache
-from utils import MAIN_AUTHORS, DB_PATH, logger, timeit
+from utils import MAIN_AUTHORS, DB_PATH, GRAPH_CACHE_FILE, logger, timeit
 from etl import get_connection
 
 # Регистрируем страницу
@@ -57,9 +57,12 @@ STYLESHEET = [
 ]
 
 # ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=8)
 @timeit
-def load_data_from_db():
+def load_data_from_db(key):
+    """Загрузка публикаций и authorship. Кэшируется по ключу состояния БД:
+    после ETL ключ меняется, и данные читаются из БД заново (иначе после
+    пересборки графа вернулись бы старые — пустые — таблицы из кэша)."""
     with get_connection() as conn:
         df_pubs = pd.read_sql("SELECT * FROM publications", conn)
         df_auth = pd.read_sql("SELECT * FROM authorship", conn)
@@ -70,26 +73,27 @@ def load_data_from_db():
 # Хранит полный граф в pickle-файле, чтобы не перестраивать его при каждом
 # открытии главной (и после рестарта контейнера). Ключ = состояние БД,
 # поэтому после ETL кэш автоматически пересоздаётся.
-GRAPH_CACHE_FILE = Path(__file__).resolve().parent.parent / 'graph_cache.pkl'
+# Путь к файлу определён в utils.GRAPH_CACHE_FILE (единый для приложения и ETL).
 
 # Версия структуры закэшированного графа. Увеличивать при изменении
 # графа/раскладки в коде — старый graph_cache.pkl станет невалидным.
 CACHE_VERSION = 5
 
-@lru_cache(maxsize=1)
 def _db_state_key():
-    """Хэш состояния БД + версии кода — меняется после ETL или правок построителя.
+    """Ключ состояния БД + версии кода — меняется после ETL или правок построителя.
 
-    Кэшируется: build_graph вызывает этот ключ при каждом движении слайдера,
-    а состояние БД в процессе приложения не меняется (ETL запускается отдельно).
-    Сброс — в clear_graph_cache() после ETL.
+    Основан на mtime файла БД (одна дешёвая операция stat, без запросов к БД)
+    и намеренно НЕ кэшируется: ETL пишет в pure_data.db отдельным процессом,
+    поэтому при следующем движении слайдера / перезагрузке страницы ключ сам
+    меняется, и граф пересобирается без рестарта приложения. Раньше ключ
+    считался по COUNT(*) и кэшировался (lru_cache) — запущенное приложение после
+    ETL продолжало отдавать закэшированный пустой граф, хотя данные в БД были.
     """
-    with get_connection() as conn:
-        pubs = pd.read_sql("SELECT COUNT(*) FROM publications", conn).iloc[0, 0]
-        authors = pd.read_sql("SELECT COUNT(*) FROM authors", conn).iloc[0, 0]
-        meta = pd.read_sql("SELECT value FROM etl_metadata WHERE key = 'last_etl_run'", conn)
-        last = meta.iloc[0, 0] if not meta.empty else ''
-    return hashlib.md5(f"{CACHE_VERSION}:{pubs}:{authors}:{last}".encode()).hexdigest()
+    try:
+        mtime = Path(DB_PATH).resolve().stat().st_mtime_ns
+    except OSError:
+        mtime = 0
+    return hashlib.md5(f"{CACHE_VERSION}:{mtime}".encode()).hexdigest()
 
 def _load_graph_from_disk(key):
     if not GRAPH_CACHE_FILE.exists():
@@ -112,9 +116,9 @@ def _save_graph_to_disk(key, G):
     except Exception as e:
         logger.warning(f"Не удалось сохранить кэш графа: {e}")
 
-def _build_full_graph():
+def _build_full_graph(key):
     """Полное построение графа без фильтров."""
-    df_pubs, df_auth = load_data_from_db()
+    df_pubs, df_auth = load_data_from_db(key)
 
     if df_pubs.empty:
         logger.warning("Нет данных для построения графа")
@@ -266,7 +270,7 @@ def _cached_full_graph(key):
     """Полный граф: с диска, либо построение + сохранение. Кэш по ключу БД."""
     G = _load_graph_from_disk(key)
     if G is None:
-        G = _build_full_graph()
+        G = _build_full_graph(key)
         _save_graph_to_disk(key, G)
     return G
 
@@ -289,7 +293,7 @@ def clear_graph_cache():
     """Сброс кэша графа (память + диск). Вызывается после ETL."""
     _cached_full_graph.cache_clear()
     load_data_from_db.cache_clear()
-    _db_state_key.cache_clear()
+    # _db_state_key() не кэшируется (mtime читается заново), сбрасывать нечего.
     try:
         GRAPH_CACHE_FILE.unlink(missing_ok=True)
         logger.info("Дисковый кэш графа удалён")
