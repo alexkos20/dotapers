@@ -6,7 +6,7 @@ from dash import html, dcc, callback, Input, Output
 import dash_bootstrap_components as dbc
 import pandas as pd
 from utils import logger
-from etl import get_connection, get_author_stats, init_db
+from etl import get_connection, get_author_stats, get_author_name, init_db
 
 dash.register_page(__name__, path='/compare', name='Сравнение авторов')
 
@@ -83,9 +83,3 @@ def update_comparison(author1_id, author2_id):
     ], bordered=True, hover=True, className="mt-3")
 
     return table
-
-def get_author_name(author_id):
-    """Возвращает имя автора по id."""
-    with get_connection() as conn:
-        df = pd.read_sql("SELECT name FROM authors WHERE id = ?", conn, params=[author_id])
-        return df.iloc[0]['name'] if not df.empty else author_id
