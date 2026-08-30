@@ -1,8 +1,9 @@
 import os
 
 import dash
-from dash import html, dcc, page_container
+from dash import html, page_container
 import dash_bootstrap_components as dbc
+from utils import logger
 
 app = dash.Dash(__name__, use_pages=True, external_stylesheets=[dbc.themes.FLATLY])
 server = app.server
@@ -24,10 +25,7 @@ navbar = dbc.NavbarSimple(
 
 # ===== ОСНОВНОЙ LAYOUT =====
 app.layout = html.Div([
-    dcc.Location(id='url'),
     navbar,
-    dcc.Store(id='global-store', storage_type='memory'),
-    dcc.Store(id='graph-cache', storage_type='session'),
     page_container
 ])
 
@@ -37,6 +35,6 @@ if __name__ == '__main__':
     # чтобы не было reloader-процессов, удерживающих порт.
     # host=0.0.0.0 — чтобы порт был доступен снаружи (в т.ч. из Docker).
     debug = os.environ.get('DASH_DEBUG', '0').lower() in ('1', 'true', 'yes')
-    print("Зарегистрированные страницы:", dash.page_registry.keys())
+    logger.info("Зарегистрированные страницы: %s", sorted(dash.page_registry.keys()))
     app.run(host='0.0.0.0', port=8050, debug=debug)
 
