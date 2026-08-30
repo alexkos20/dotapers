@@ -323,6 +323,12 @@ def get_author_topics(author_id):
         from collections import Counter
         return Counter(topics).most_common(5)
 
+def get_author_name(author_id):
+    """Возвращает имя автора по id (или сам id, если не найден)."""
+    with get_connection() as conn:
+        df = pd.read_sql("SELECT name FROM authors WHERE id = ?", conn, params=[author_id])
+        return df.iloc[0]['name'] if not df.empty else author_id
+
 if __name__ == '__main__':
     import sys
     import schedule

@@ -4,7 +4,7 @@ import dash_bootstrap_components as dbc
 from utils import logger
 from etl import (
     get_author_stats, get_author_publications,
-    get_author_coauthors, get_author_topics
+    get_author_coauthors, get_author_topics, get_author_name
 )
 
 dash.register_page(__name__, path_template='/author/<author_id>', name='Профиль автора')
@@ -25,9 +25,10 @@ def layout(author_id=None, **kwargs):
         return html.Div("Ошибка загрузки данных", className="text-danger mt-4")
 
     # Карточка с метриками
+    author_name = get_author_name(author_id)
     card = dbc.Card([
         dbc.CardBody([
-            html.H4(f"👤 {author_id}", className="card-title"),
+            html.H4(f"👤 {author_name}", className="card-title"),
             html.Hr(),
             dbc.Row([
                 dbc.Col(html.Div([

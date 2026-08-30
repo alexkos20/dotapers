@@ -11,6 +11,7 @@ navbar = dbc.NavbarSimple(
     children=[
         dbc.NavItem(dbc.NavLink(page['name'], href=page['relative_path']))
         for page in dash.page_registry.values()
+        if page.get('path_template') is None  # страницы с параметрами (профиль автора) не имеют фиксированного пути
     ],
     brand="SPBU Dashboard",
     brand_href="/",
