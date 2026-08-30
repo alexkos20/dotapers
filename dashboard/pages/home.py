@@ -74,7 +74,7 @@ GRAPH_CACHE_FILE = Path(__file__).resolve().parent.parent / 'graph_cache.pkl'
 
 # Версия структуры закэшированного графа. Увеличивать при изменении
 # графа/раскладки в коде — старый graph_cache.pkl станет невалидным.
-CACHE_VERSION = 4
+CACHE_VERSION = 5
 
 def _db_state_key():
     """Хэш состояния БД + версии кода — меняется после ETL или правок построителя."""
@@ -151,18 +151,14 @@ def _build_full_graph():
     # Детерминированная раскладка. Считается один раз и сохраняется вместе с
     # графом в дисковом кэше; клиент расставляет узлы по preset (без повторного
     # запуска cose-layout при каждом открытии страницы).
-    # k = идеальная длина ребра. 7.5/sqrt(n) — в 3 раза больше прежнего (2.5),
-    # плюс финальный проход _push_apart_overlaps убирает перекрытия кругов узлов,
-    # которые обычный force-directed layout не устраняет.
-    n_nodes = G.number_of_nodes()
-    if n_nodes == 0:
+    # Компоненты связности раскладываются отдельно и упаковываются в ряды с
+    # зазорами (_layout_by_components) — иначе разные кластеры наезжают друг на
+    # друга и граф превращается в «кашу».
+    if G.number_of_nodes() == 0:
         return G
-    k = 7.5 / n_nodes ** 0.5
-    pos = nx.spring_layout(G, seed=42, iterations=30, k=k)
-    positions = {n: [float(pos[n][0]) * 150, float(pos[n][1]) * 150] for n in G.nodes()}
-    _push_apart_overlaps(G, positions)
+    positions = _layout_by_components(G)
     for n in G.nodes():
-        G.nodes[n]['pos'] = {'x': positions[n][0], 'y': positions[n][1]}
+        G.nodes[n]['pos'] = {'x': float(positions[n][0]), 'y': float(positions[n][1])}
 
     return G
 
@@ -197,6 +193,66 @@ def _push_apart_overlaps(G, positions, gap_factor=2.5, max_iter=60):
                     total_move += push
         if total_move < 0.05:
             break
+
+
+def _layout_by_components(G):
+    """Раскладывает каждый компонент связности отдельно и упаковывает кластеры
+    в ряды (shelf packing) с зазором — компоненты не пересекаются и не образуют
+    «кашу». Детерминировано: единый seed у spring_layout + фиксированный порядок
+    компонент (по убыванию размера)."""
+    comps = sorted((G.subgraph(c).copy() for c in nx.connected_components(G)),
+                   key=lambda c: c.number_of_nodes(), reverse=True)
+    if not comps:
+        return {}
+
+    UNIT = 40.0  # пикселей на условную единицу размера (side = sqrt(nodes))
+    boxes = []   # (width, height, node -> [x, y] локальные координаты)
+
+    for comp in comps:
+        n = comp.number_of_nodes()
+        if n == 1:
+            local = {next(iter(comp.nodes())): [0.0, 0.0]}
+        else:
+            cpos = nx.spring_layout(comp, seed=42, iterations=30, k=7.5 / n ** 0.5)
+            xs = [p[0] for p in cpos.values()]
+            ys = [p[1] for p in cpos.values()]
+            w = (max(xs) - min(xs)) or 1.0
+            h = (max(ys) - min(ys)) or 1.0
+            side = math.sqrt(n)
+            local = {nd: [((x - min(xs)) / w) * side * UNIT,
+                          ((y - min(ys)) / h) * side * UNIT]
+                     for nd, (x, y) in cpos.items()}
+
+        # Убираем перекрытия узлов внутри компоненты (работает в пикселях)
+        _push_apart_overlaps(comp, local)
+        xs = [p[0] for p in local.values()]
+        ys = [p[1] for p in local.values()]
+        minx, miny = min(xs), min(ys)
+        for nd in local:
+            local[nd] = [local[nd][0] - minx, local[nd][1] - miny]
+        xs = [p[0] for p in local.values()]
+        ys = [p[1] for p in local.values()]
+        boxes.append(((max(xs) - min(xs)) or UNIT,
+                      (max(ys) - min(ys)) or UNIT,
+                      local))
+
+    # Shelf-упаковка: заполняем ряды слева направо, ширина ряда ~1.6*sqrt(площадей)
+    GAP = 120.0  # пикселей между компонентами (больше, чем диаметр узла)
+    total_area = sum(w * h for w, h, _ in boxes)
+    row_target = math.sqrt(total_area) * 1.6
+
+    positions = {}
+    x, y, row_h = 0.0, 0.0, 0.0
+    for w, h, local in boxes:
+        if x > 0 and x + w > row_target:
+            x, y = 0.0, y + row_h + GAP
+            row_h = 0.0
+        for nd, (px, py) in local.items():
+            positions[nd] = (x + px, y + py)
+        x += w + GAP
+        row_h = max(row_h, h)
+
+    return positions
 
 
 @lru_cache(maxsize=8)
