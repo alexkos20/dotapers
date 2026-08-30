@@ -295,9 +295,9 @@ def get_author_coauthors(author_id):
     """Список соавторов с числом совместных работ."""
     with get_connection() as conn:
         df = pd.read_sql("""
-            SELECT a2.id, a2.name, COUNT(*) as joint_works
+            SELECT a2_info.id, a2_info.name, COUNT(*) as joint_works
             FROM authorship a1
-            JOIN authorship a2 ON a1.publication_id = a2.publication_id 
+            JOIN authorship a2 ON a1.publication_id = a2.publication_id
             JOIN authors a2_info ON a2.author_id = a2_info.id
             WHERE a1.author_id = ? AND a2.author_id != ?
             GROUP BY a2.author_id

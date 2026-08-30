@@ -70,11 +70,13 @@ def build_graph(min_pubs=1, min_cites=0):
         logger.warning("Нет данных для построения графа")
         return nx.Graph()
 
-    # Собираем словарь author_id -> author_name
+    # Собираем словари author_id -> author_name и author_name -> author_id
     author_names = {}
+    author_ids = {}
     with get_connection() as conn:
         df_authors = pd.read_sql("SELECT id, name FROM authors", conn)
         author_names = dict(zip(df_authors['id'], df_authors['name']))
+        author_ids = dict(zip(df_authors['name'], df_authors['id']))
 
     G = nx.Graph()
 
@@ -90,6 +92,7 @@ def build_graph(min_pubs=1, min_cites=0):
                 G.add_node(author_name,
                            publications=0,
                            total_citations=0,
+                           author_id=author_ids.get(author_name, author_name),
                            is_main_author=author_name in MAIN_AUTHORS)
             G.nodes[author_name]['publications'] += 1
             G.nodes[author_name]['total_citations'] += cited_by
@@ -142,7 +145,7 @@ def graph_to_cytoscape_elements(G):
                 'id': node,
                 'label': label,
                 'full_name': node,
-                'author_id': node,
+                'author_id': G.nodes[node].get('author_id', node),
                 'publications': pubs,
                 'citations': G.nodes[node].get('total_citations', 0),
                 'is_main_author': is_main,
