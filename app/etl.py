@@ -64,11 +64,10 @@ def init_db():
 
 
 def get_last_etl_time():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT value FROM etl_metadata WHERE key = 'last_etl_run'")
-    row = cursor.fetchone()
-    conn.close()
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM etl_metadata WHERE key = 'last_etl_run'")
+        row = cursor.fetchone()
     return row[0] if row else None
 
 
@@ -92,17 +91,43 @@ def update_etl_metadata(total_added=0, total_updated=0, total_failed=0):
         conn.commit()
         logger.info(f"Метаданные ETL обновлены: добавлено {total_added}, обновлено {total_updated}")
 
+def _normalize_name(name):
+    """Нормализация имени для сравнения: нижний регистр, только буквы/цифры.
+
+    Пробелы, дефисы, точки в инициалах не учитываются: 'E. A. Lejnina' ==
+    'EA Lejnina' == 'e a lejnina'.
+    """
+    if not name:
+        return ''
+    return ''.join(ch for ch in str(name).lower() if ch.isalnum())
+
+
 def get_author_id(display_name):
+    """Возвращает author_id по имени, требуя точного совпадения display_name.
+
+    Поиск OpenAlex возвращает кандидатов по релевантности, и первый из них может
+    оказаться однофамильцем. Брать results[0] без проверки — значит молча
+    загрузить публикации чужого человека. Поэтому ищем нормализованное точное
+    совпадение по всем кандидатам; если совпадения нет — автор пропускается, а
+    в лог пишется ERROR со списком кандидатов.
+    """
     url = f"{BASE_URL}/authors"
     params = {'search': display_name, 'select': 'id,display_name'}
+    query_norm = _normalize_name(display_name)
     try:
         resp = requests.get(url, params=params, timeout=30)
         if resp.status_code == 200:
             data = resp.json()
             if data['meta']['count'] > 0:
-                author = data['results'][0]
-                logger.info(f"Найден автор: {author['display_name']}")
-                return author['id']
+                results = data['results']
+                for author in results:
+                    if _normalize_name(author.get('display_name', '')) == query_norm:
+                        logger.info(f"Найден автор: {author['display_name']}")
+                        return author['id']
+                logger.error(
+                    f"Автор {display_name} не найден по точному совпадению. "
+                    f"Кандидаты: {[a.get('display_name') for a in results[:5]]}"
+                )
         logger.warning(f"Автор {display_name} не найден")
     except Exception as e:
         logger.error(f"Ошибка поиска {display_name}: {e}")
@@ -186,8 +211,8 @@ def insert_publication(conn, work_info, content_hash):
 def update_publication(conn, work_info, content_hash):
     cursor = conn.cursor()
     cursor.execute("""
-        UPDATE publications 
-        SET title=?, publication_year=?, cited_by_count=?, topics=?, journal=?, 
+        UPDATE publications
+        SET title=?, publication_year=?, cited_by_count=?, topics=?, journal=?,
             updated_date=?, content_hash=?, last_loaded=?
         WHERE id=?
     """, (
@@ -196,6 +221,21 @@ def update_publication(conn, work_info, content_hash):
         work_info['updated_date'], content_hash, datetime.now().isoformat(),
         work_info['id']
     ))
+
+    # Состав соавторов мог измениться (content_hash включает authorships):
+    # пересоздаём authorship из актуальных данных, иначе связи для этой работы
+    # рассинхронизируются (например, останется неполный список после обрыва ETL).
+    cursor.execute("DELETE FROM authorship WHERE publication_id = ?", (work_info['id'],))
+    for author_name, author_id in zip(work_info['authors'], work_info['author_ids']):
+        if author_id:
+            cursor.execute(
+                "INSERT OR IGNORE INTO authors (id, name, last_loaded) VALUES (?, ?, ?)",
+                (author_id, author_name, datetime.now().isoformat())
+            )
+            cursor.execute(
+                "INSERT OR IGNORE INTO authorship (author_id, publication_id) VALUES (?, ?)",
+                (author_id, work_info['id'])
+            )
     conn.commit()
 
 
@@ -278,12 +318,23 @@ def ensure_data(force=False):
     """Запускает ETL, если данных нет (или force=True). Возвращает True, если прогон был."""
     if force or needs_etl():
         logger.info("Данных нет — запускаю ETL (нужен интернет для OpenAlex)...")
-        run_etl()
+        try:
+            run_etl()
+        except sqlite3.DatabaseError as e:
+            # pure_data.db повреждена (например, обрыв записи) — валидные таблицы
+            # из неё не прочитать, приложение падало бы на всех страницах.
+            # Удаляем битый файл и пересоздаём базу с нуля.
+            logger.error(f"База данных повреждена ({e}) — удаляю файл и пересоздаю")
+            try:
+                os.remove(DB_PATH)
+            except OSError as remove_err:
+                logger.error(f"Не удалось удалить битую БД {DB_PATH}: {remove_err}")
+                raise
+            run_etl()
         return True
     logger.info("Данные уже есть, ETL не требуется")
     return False
 
-# etl.py (дополнить)
 
 def get_author_stats(author_id):
     """Возвращает статистику по автору."""
