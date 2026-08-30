@@ -1,0 +1,31 @@
+# ============================================================
+#  SPBU Dashboard — зависимости для запуска приложения
+#  Установка:  .venv/bin/pip install -r requirements.txt
+#  Запуск:     cd dashboard && ../.venv/bin/python app.py
+# ============================================================
+
+# --- Фреймворк дашборда ---
+dash>=3.0
+dash-bootstrap-components>=2.0
+dash-cytoscape>=1.0
+
+# --- Визуализация ---
+plotly>=6.0
+matplotlib>=3.9
+
+# --- Данные ---
+pandas>=2.2
+numpy>=2.0
+
+# --- Сети ---
+networkx>=3.3
+
+# --- HTTP / ETL / планировщик ---
+requests>=2.32
+schedule>=1.2
+
+# --- Опционально: только для spbu_author.ipynb ---
+# litstudy  (старая библиотека, на Python 3.14 скорее всего НЕ установится.
+#            Классы Document/DocumentSet/Author нужны только ноутбуку,
+#            для дашборда не требуются.)
+# matplotlib уже указан выше (нужен ноутбуку и графикам).

@@ -1,34 +1,18 @@
 import dash
-from dash import html, dcc, callback, Input, Output
+from dash import html
 import dash_bootstrap_components as dbc
-import plotly.graph_objects as go
 from utils import logger
 from etl import (
     get_author_stats, get_author_publications,
     get_author_coauthors, get_author_topics
 )
 
-dash.register_page(__name__, path='/author/<author_id>', name='Профиль автора')
+dash.register_page(__name__, path_template='/author/<author_id>', name='Профиль автора')
 
-def layout(author_id=None):
-    """Функция layout получает author_id из URL."""
-    return html.Div([
-        html.Div(id='author-profile-container', children=[
-            html.P("Загрузка данных...", className="text-muted")
-        ])
-    ])
-
-@callback(
-    Output('author-profile-container', 'children'),
-    Input('url', 'pathname')
-)
-def load_author_profile(pathname):
-    print("Callback вызван! pathname =", pathname)
-    if not pathname or not pathname.startswith('/author/'):
-        return html.Div("Автор не указан", className="text-warning")
-    author_id = pathname.split('/')[-1]
-    if not author_id:
-        return html.Div("Некорректный идентификатор", className="text-danger")
+def layout(author_id=None, **kwargs):
+    """author_id приходит из URL (path_template) — раскодированный целиком."""
+    if not author_id or author_id == 'none':
+        return html.Div("Автор не указан", className="text-warning mt-4")
 
     # Загружаем данные
     try:
@@ -38,9 +22,9 @@ def load_author_profile(pathname):
         topics = get_author_topics(author_id)
     except Exception as e:
         logger.error(f"Ошибка загрузки профиля {author_id}: {e}")
-        return html.Div("Ошибка загрузки данных", className="text-danger")
+        return html.Div("Ошибка загрузки данных", className="text-danger mt-4")
 
-    # Строим карточку
+    # Карточка с метриками
     card = dbc.Card([
         dbc.CardBody([
             html.H4(f"👤 {author_id}", className="card-title"),
@@ -101,7 +85,6 @@ def load_author_profile(pathname):
     else:
         topics_list.append(html.Li("Тем не найдено"))
 
-    # Собираем страницу
     return html.Div([
         card,
         dbc.Row([
