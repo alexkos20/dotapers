@@ -1,0 +1,12 @@
+services:
+  app:
+    build: .
+    container_name: spbu-dashboard
+    ports:
+      - "8050:8050"
+    environment:
+      DASH_DEBUG: "0"
+    volumes:
+      # Код + БД живут на хосте: pure_data.db не пропадает при пересборке
+      - ./dashboard:/app/dashboard
+    restart: unless-stopped

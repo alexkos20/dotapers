@@ -1,3 +1,5 @@
+import os
+
 import dash
 from dash import html, dcc, page_container
 import dash_bootstrap_components as dbc
@@ -31,6 +33,10 @@ app.layout = html.Div([
 
 # ===== ЗАПУСК =====
 if __name__ == '__main__':
+    # debug включается через DASH_DEBUG=1; по умолчанию выключен,
+    # чтобы не было reloader-процессов, удерживающих порт.
+    # host=0.0.0.0 — чтобы порт был доступен снаружи (в т.ч. из Docker).
+    debug = os.environ.get('DASH_DEBUG', '0').lower() in ('1', 'true', 'yes')
     print("Зарегистрированные страницы:", dash.page_registry.keys())
-    app.run(debug=True, port=8050)
+    app.run(host='0.0.0.0', port=8050, debug=debug)
 
