@@ -54,9 +54,9 @@ def compute_hash(work):
 
 def clear_all_caches():
     try:
-        from app import load_data_from_db, build_graph
-        load_data_from_db.cache_clear()
-        build_graph.cache_clear()
+        from pages.home import clear_graph_cache
+        clear_graph_cache()
         logger.info("Все кэши очищены")
-    except (ImportError, AttributeError):
+    except Exception:
+        # вне контекста приложения (например, отдельный процесс ETL)
         logger.warning("Не удалось очистить кэш (возможно, app ещё не загружен)")
