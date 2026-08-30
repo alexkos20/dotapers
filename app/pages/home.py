@@ -1,6 +1,7 @@
 import hashlib
 import math
 import pickle
+import sqlite3
 from pathlib import Path
 
 import dash
@@ -64,8 +65,16 @@ def load_data_from_db(key):
     после ETL ключ меняется, и данные читаются из БД заново (иначе после
     пересборки графа вернулись бы старые — пустые — таблицы из кэша)."""
     with get_connection() as conn:
-        df_pubs = pd.read_sql("SELECT * FROM publications", conn)
-        df_auth = pd.read_sql("SELECT * FROM authorship", conn)
+        try:
+            df_pubs = pd.read_sql("SELECT * FROM publications", conn)
+            df_auth = pd.read_sql("SELECT * FROM authorship", conn)
+        except (sqlite3.Error, pd.errors.DatabaseError) as e:
+            # Таблиц ещё нет (например, AUTO_ETL=0 и БД не инициализирована) или
+            # файл повреждён — возвращаем пустые таблицы, чтобы граф показал
+            # дружелюбное «нет данных» вместо падения callback'а.
+            # pandas оборачивает sqlite-ошибки в pd.errors.DatabaseError.
+            logger.warning(f"Не удалось прочитать таблицы БД ({e}) — пустые данные")
+            return pd.DataFrame(), pd.DataFrame()
     logger.info(f"Загружено {len(df_pubs)} публикаций из БД")
     return df_pubs, df_auth
 
@@ -77,7 +86,7 @@ def load_data_from_db(key):
 
 # Версия структуры закэшированного графа. Увеличивать при изменении
 # графа/раскладки в коде — старый graph_cache.pkl станет невалидным.
-CACHE_VERSION = 5
+CACHE_VERSION = 6
 
 def _db_state_key():
     """Ключ состояния БД + версии кода — меняется после ETL или правок построителя.
@@ -124,13 +133,15 @@ def _build_full_graph(key):
         logger.warning("Нет данных для построения графа")
         return nx.Graph()
 
-    # Собираем словари author_id -> author_name и author_name -> author_id
+    # Словарь author_id -> имя (для подписи узла и проверки «основных» авторов).
+    # Узлы графа ключуем по author_id, а не по имени: однофамильцы с разными
+    # author_id (в БД есть «Anna Smoliarova» ×2 и «Svetlana S. Bodrunova» ×3) —
+    # это разные люди, и они не должны сливаться в один узел (иначе счётчики
+    # публикаций/цитирований суммируются, а клик ведёт на чужой профиль).
     author_names = {}
-    author_ids = {}
     with get_connection() as conn:
         df_authors = pd.read_sql("SELECT id, name FROM authors", conn)
         author_names = dict(zip(df_authors['id'], df_authors['name']))
-        author_ids = dict(zip(df_authors['name'], df_authors['id']))
 
     G = nx.Graph()
 
@@ -139,20 +150,20 @@ def _build_full_graph(key):
         cited_by = pub['cited_by_count']
 
         authors_in_pub = df_auth[df_auth['publication_id'] == pub_id]['author_id'].tolist()
-        author_names_list = [author_names.get(aid, aid) for aid in authors_in_pub if aid in author_names]
+        author_id_list = [aid for aid in authors_in_pub if aid in author_names]
 
-        for author_name in author_names_list:
-            if author_name not in G:
-                G.add_node(author_name,
+        for author_id in author_id_list:
+            if author_id not in G:
+                G.add_node(author_id,
                            publications=0,
                            total_citations=0,
-                           author_id=author_ids.get(author_name, author_name),
-                           is_main_author=author_name in MAIN_AUTHORS)
-            G.nodes[author_name]['publications'] += 1
-            G.nodes[author_name]['total_citations'] += cited_by
+                           name=author_names[author_id],
+                           is_main_author=author_names[author_id] in MAIN_AUTHORS)
+            G.nodes[author_id]['publications'] += 1
+            G.nodes[author_id]['total_citations'] += cited_by
 
-        for i, a1 in enumerate(author_names_list):
-            for a2 in author_names_list[i + 1:]:
+        for i, a1 in enumerate(author_id_list):
+            for a2 in author_id_list[i + 1:]:
                 if G.has_edge(a1, a2):
                     G[a1][a2]['weight'] += 1
                 else:
@@ -324,15 +335,17 @@ def graph_to_cytoscape_elements(G):
 
         pubs = G.nodes[node].get('publications', 1)
         node_size = 20 + min(pubs, 30)
-        label = node.split()[-1] if len(node.split()) > 1 else node
+        # Узел ключуется по author_id, поэтому имя для подписи берём из атрибута
+        name = G.nodes[node].get('name', node)
+        label = name.split()[-1] if len(name.split()) > 1 else name
 
         nodes.append({
             'position': G.nodes[node].get('pos', {}),
             'data': {
                 'id': node,
                 'label': label,
-                'full_name': node,
-                'author_id': G.nodes[node].get('author_id', node),
+                'full_name': name,
+                'author_id': node,
                 'publications': pubs,
                 'citations': G.nodes[node].get('total_citations', 0),
                 'is_main_author': is_main,
