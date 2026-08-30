@@ -1,3 +1,7 @@
+import hashlib
+import pickle
+from pathlib import Path
+
 import dash
 from dash import html, dcc, Input, Output, callback
 import dash_cytoscape as cyto
@@ -61,9 +65,44 @@ def load_data_from_db():
     logger.info(f"Загружено {len(df_pubs)} публикаций из БД")
     return df_pubs, df_auth
 
-@lru_cache(maxsize=32)
-@timeit
-def build_graph(min_pubs=1, min_cites=0):
+# ===== ДИСКОВЫЙ КЭШ ГРАФА =====
+# Хранит полный граф в pickle-файле, чтобы не перестраивать его при каждом
+# открытии главной (и после рестарта контейнера). Ключ = состояние БД,
+# поэтому после ETL кэш автоматически пересоздаётся.
+GRAPH_CACHE_FILE = Path(__file__).resolve().parent.parent / 'graph_cache.pkl'
+
+def _db_state_key():
+    """Хэш состояния БД — меняется после ETL, инвалидирует кэш."""
+    with get_connection() as conn:
+        pubs = pd.read_sql("SELECT COUNT(*) FROM publications", conn).iloc[0, 0]
+        authors = pd.read_sql("SELECT COUNT(*) FROM authors", conn).iloc[0, 0]
+        meta = pd.read_sql("SELECT value FROM etl_metadata WHERE key = 'last_etl_run'", conn)
+        last = meta.iloc[0, 0] if not meta.empty else ''
+    return hashlib.md5(f"{pubs}:{authors}:{last}".encode()).hexdigest()
+
+def _load_graph_from_disk(key):
+    if not GRAPH_CACHE_FILE.exists():
+        return None
+    try:
+        with open(GRAPH_CACHE_FILE, 'rb') as f:
+            saved_key, G = pickle.load(f)
+        if saved_key == key:
+            logger.info("Граф загружен из дискового кэша")
+            return G
+    except Exception as e:
+        logger.warning(f"Кэш графа повреждён, будет пересоздан: {e}")
+    return None
+
+def _save_graph_to_disk(key, G):
+    try:
+        with open(GRAPH_CACHE_FILE, 'wb') as f:
+            pickle.dump((key, G), f)
+        logger.info("Граф сохранён в дисковый кэш")
+    except Exception as e:
+        logger.warning(f"Не удалось сохранить кэш графа: {e}")
+
+def _build_full_graph():
+    """Полное построение графа без фильтров."""
     df_pubs, df_auth = load_data_from_db()
 
     if df_pubs.empty:
@@ -104,6 +143,22 @@ def build_graph(min_pubs=1, min_cites=0):
                 else:
                     G.add_edge(a1, a2, weight=1)
 
+    return G
+
+@lru_cache(maxsize=8)
+def _cached_full_graph(key):
+    """Полный граф: с диска, либо построение + сохранение. Кэш по ключу БД."""
+    G = _load_graph_from_disk(key)
+    if G is None:
+        G = _build_full_graph()
+        _save_graph_to_disk(key, G)
+    return G
+
+@timeit
+def build_graph(min_pubs=1, min_cites=0):
+    key = _db_state_key()
+    G = _cached_full_graph(key)
+
     if min_pubs > 1 or min_cites > 0:
         nodes_to_keep = [
             node for node, data in G.nodes(data=True)
@@ -113,6 +168,16 @@ def build_graph(min_pubs=1, min_cites=0):
 
     logger.info(f"Граф построен: {G.number_of_nodes()} узлов, {G.number_of_edges()} рёбер")
     return G
+
+def clear_graph_cache():
+    """Сброс кэша графа (память + диск). Вызывается после ETL."""
+    _cached_full_graph.cache_clear()
+    load_data_from_db.cache_clear()
+    try:
+        GRAPH_CACHE_FILE.unlink(missing_ok=True)
+        logger.info("Дисковый кэш графа удалён")
+    except Exception as e:
+        logger.warning(f"Не удалось удалить кэш графа: {e}")
 
 def graph_to_cytoscape_elements(G):
     """Преобразует NetworkX-граф в формат для Cytoscape."""
