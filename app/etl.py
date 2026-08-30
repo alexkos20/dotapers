@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import requests
 from datetime import datetime
@@ -253,6 +254,34 @@ def run_etl():
     logger.info(f"Обновлено: {total_updated}")
     logger.info(f"Ошибок: {total_failed}")
     logger.info("=" * 50)
+
+
+def needs_etl():
+    """True, если данных для дашборда нет: база отсутствует или пустая.
+
+    Вызывается на старте приложения: если данных нет — запускаем ETL,
+    чтобы «просто запустить код» и получить наполненный граф.
+    """
+    if not os.path.exists(DB_PATH):
+        return True
+    try:
+        with get_connection() as conn:
+            pubs = pd.read_sql("SELECT COUNT(*) FROM publications", conn).iloc[0, 0]
+            auth = pd.read_sql("SELECT COUNT(*) FROM authorship", conn).iloc[0, 0]
+        return pubs == 0 or auth == 0
+    except Exception:
+        # БД есть, но повреждена/не инициализирована — пересоздадим через ETL
+        return True
+
+
+def ensure_data(force=False):
+    """Запускает ETL, если данных нет (или force=True). Возвращает True, если прогон был."""
+    if force or needs_etl():
+        logger.info("Данных нет — запускаю ETL (нужен интернет для OpenAlex)...")
+        run_etl()
+        return True
+    logger.info("Данные уже есть, ETL не требуется")
+    return False
 
 # etl.py (дополнить)
 

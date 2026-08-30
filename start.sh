@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Стартовый скрипт SPBU Dashboard
-#  1) выполняет ETL (загружает/обновляет данные из OpenAlex)
-#  2) запускает дашборд
+#  Данные загружаются автоматически при первом запуске:
+#  если pure_data.db пуст/отсутствует, приложение само запустит ETL.
 #  Использование:
-#     ./start.sh                 — ETL (один прогон) + запуск дашборда
-#     ./start.sh --no-etl        — только запуск дашборда (без ETL)
-#     ./start.sh --etl-only      — только ETL, без запуска дашборда
+#     ./start.sh               — запуск дашборда (ETL стартует сам, если данных нет)
+#     ./start.sh --force-etl   — принудительно обновить данные из OpenAlex, затем запуск
+#     ./start.sh --etl-only    — только обновить данные, без запуска дашборда
+#     ./start.sh --no-etl      — запуск без авто-загрузки данных (для отладки)
 # ============================================================
 set -euo pipefail
 
@@ -23,22 +24,24 @@ fi
 
 NO_ETL=0
 ETL_ONLY=0
+FORCE_ETL=0
 
 for arg in "$@"; do
     case "$arg" in
-        --no-etl)   NO_ETL=1 ;;
-        --etl-only) ETL_ONLY=1 ;;
+        --no-etl)     NO_ETL=1 ;;
+        --etl-only)   ETL_ONLY=1 ;;
+        --force-etl)  FORCE_ETL=1 ;;
         *)
             echo "Неизвестный аргумент: $arg"
-            echo "Допустимые: --no-etl | --etl-only"
+            echo "Допустимые: --force-etl | --etl-only | --no-etl"
             exit 1
             ;;
     esac
 done
 
-# Шаг 1: ETL (если нужен)
-if [ "$NO_ETL" -eq 0 ]; then
-    echo "=== [1/2] Запуск ETL (загрузка данных из OpenAlex) ==="
+# Принудительный ETL (обновление данных) — только если явно попросили.
+if [ "$FORCE_ETL" -eq 1 ]; then
+    echo "=== ETL: обновление данных из OpenAlex ==="
     ( cd app && "$OLDPWD/$PY" etl.py --once )
     echo "=== ETL завершён ==="
 fi
@@ -48,6 +51,11 @@ if [ "$ETL_ONLY" -eq 1 ]; then
     exit 0
 fi
 
-# Шаг 2: запуск дашборда
-echo "=== [2/2] Запуск дашборда на http://localhost:8050 ==="
-( cd app && "$OLDPWD/$PY" app.py )
+# Запуск дашборда. ETL запустится сам внутри приложения, если данных нет.
+# --no-etl отключает авто-загрузку (приложение стартует с тем, что есть).
+echo "=== Запуск дашборда на http://localhost:8050 ==="
+if [ "$NO_ETL" -eq 1 ]; then
+    ( cd app && AUTO_ETL=0 "$OLDPWD/$PY" app.py )
+else
+    ( cd app && "$OLDPWD/$PY" app.py )
+fi
