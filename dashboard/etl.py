@@ -324,10 +324,18 @@ def get_author_topics(author_id):
         return Counter(topics).most_common(5)
 
 if __name__ == '__main__':
+    import sys
     import schedule
     import time
 
+    # --once: выполнить один прогон ETL и выйти (для стартового скрипта)
+    once = '--once' in sys.argv
+
     run_etl()
+
+    if once:
+        logger.info("ETL выполнен (режим --once). Завершение.")
+        sys.exit(0)
 
     schedule.every().day.at("08:00").do(run_etl)
     logger.info("Планировщик запущен. ETL будет выполняться ежедневно в 8:00")
