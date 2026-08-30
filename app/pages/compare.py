@@ -19,31 +19,40 @@ def load_authors_list():
     return [{'label': row['name'], 'value': row['id']} for _, row in df.iterrows()]
 
 # ===== LAYOUT =====
-layout = html.Div([
-    html.H1("📊 Сравнение авторов", className="mt-4"),
-    html.Hr(),
-    dbc.Row([
-        dbc.Col([
-            html.Label("Выберите первого автора:"),
-            dcc.Dropdown(
-                id='author1-dropdown',
-                options=load_authors_list(),  # реальные авторы
-                placeholder='Выберите автора...'
-            )
-        ], width=6),
-        dbc.Col([
-            html.Label("Выберите второго автора:"),
-            dcc.Dropdown(
-                id='author2-dropdown',
-                options=load_authors_list(),  # реальные авторы
-                placeholder='Выберите автора...'
-            )
-        ], width=6),
-    ], className="mb-4"),
-    html.Div(id='comparison-results', children=[
-        html.P("Выберите двух авторов для сравнения", className="text-muted")
+def layout(**kwargs):
+    """Строится при каждом открытии страницы.
+
+    Список авторов читается из БД в момент перехода, а не при импорте модуля:
+    на свежем компьютере при импорте база ещё пустая (авто-ETL заполняет её
+    чуть позже, перед стартом сервера), и список, посчитанный один раз при
+    импорте, остался бы пустым навсегда.
+    """
+    options = load_authors_list()  # реальные авторы
+    return html.Div([
+        html.H1("📊 Сравнение авторов", className="mt-4"),
+        html.Hr(),
+        dbc.Row([
+            dbc.Col([
+                html.Label("Выберите первого автора:"),
+                dcc.Dropdown(
+                    id='author1-dropdown',
+                    options=options,
+                    placeholder='Выберите автора...'
+                )
+            ], width=6),
+            dbc.Col([
+                html.Label("Выберите второго автора:"),
+                dcc.Dropdown(
+                    id='author2-dropdown',
+                    options=options,
+                    placeholder='Выберите автора...'
+                )
+            ], width=6),
+        ], className="mb-4"),
+        html.Div(id='comparison-results', children=[
+            html.P("Выберите двух авторов для сравнения", className="text-muted")
+        ])
     ])
-])
 
 # ===== CALLBACK СРАВНЕНИЯ =====
 @callback(
