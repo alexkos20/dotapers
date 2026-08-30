@@ -35,16 +35,20 @@ if __name__ == '__main__':
     # debug включается через DASH_DEBUG=1; по умолчанию выключен,
     # чтобы не было reloader-процессов, удерживающих порт.
     # host=0.0.0.0 — чтобы порт был доступен снаружи (в т.ч. из Docker).
-    #
+    debug = os.environ.get('DASH_DEBUG', '0').lower() in ('1', 'true', 'yes')
+
     # Авто-загрузка данных: если pure_data.db пуст/отсутствует — ETL запустится
     # сам (нужен интернет). Отключить можно AUTO_ETL=0 (используется start.sh --no-etl).
+    # При debug=1 Dash-reloader запускает дочерний процесс (WERKZEUG_RUN_MAIN=true),
+    # и __main__ исполняется в обоих процессах. Запускаем ETL только в дочернем,
+    # чтобы прогон не дублировался (вместе с без debug — в единственном процессе).
     if os.environ.get('AUTO_ETL', '1').lower() not in ('0', 'false', 'no'):
-        try:
-            ensure_data()
-        except Exception as e:
-            logger.error(f"Автозагрузка данных не удалась: {e}")
+        if not debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
+            try:
+                ensure_data()
+            except Exception as e:
+                logger.error(f"Автозагрузка данных не удалась: {e}")
 
-    debug = os.environ.get('DASH_DEBUG', '0').lower() in ('1', 'true', 'yes')
     logger.info("Зарегистрированные страницы: %s", sorted(dash.page_registry.keys()))
     app.run(host='0.0.0.0', port=8050, debug=debug)
 

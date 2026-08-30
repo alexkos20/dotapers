@@ -22,6 +22,16 @@ if [ ! -x "$PY" ]; then
     exit 1
 fi
 
+# PY_BIN — путь к интерпретатору для запуска из подкаталога app/:
+# относительный PY (по умолчанию .venv/bin/python) дополняем до корня репо
+# ($(pwd) после cd "$(dirname "$0")"), абсолютный PYTHON используем как есть.
+# Иначе абсолютный путь в "$OLDPWD/$PY" превратился бы в /репо//usr/bin/python.
+if [ "${PY#/}" != "$PY" ]; then
+    PY_BIN="$PY"
+else
+    PY_BIN="$(pwd)/$PY"
+fi
+
 NO_ETL=0
 ETL_ONLY=0
 FORCE_ETL=0
@@ -42,7 +52,7 @@ done
 # Принудительный ETL (обновление данных) — только если явно попросили.
 if [ "$FORCE_ETL" -eq 1 ]; then
     echo "=== ETL: обновление данных из OpenAlex ==="
-    ( cd app && "$OLDPWD/$PY" etl.py --once )
+    ( cd app && "$PY_BIN" etl.py --once )
     echo "=== ETL завершён ==="
 fi
 
@@ -55,7 +65,7 @@ fi
 # --no-etl отключает авто-загрузку (приложение стартует с тем, что есть).
 echo "=== Запуск дашборда на http://localhost:8050 ==="
 if [ "$NO_ETL" -eq 1 ]; then
-    ( cd app && AUTO_ETL=0 "$OLDPWD/$PY" app.py )
+    ( cd app && AUTO_ETL=0 "$PY_BIN" app.py )
 else
-    ( cd app && "$OLDPWD/$PY" app.py )
+    ( cd app && "$PY_BIN" app.py )
 fi

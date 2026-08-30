@@ -2,6 +2,7 @@ import hashlib
 import math
 import pickle
 import sqlite3
+import threading
 from pathlib import Path
 
 import dash
@@ -58,7 +59,7 @@ STYLESHEET = [
 ]
 
 # ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
-@lru_cache(maxsize=8)
+@lru_cache(maxsize=2)
 @timeit
 def load_data_from_db(key):
     """Загрузка публикаций и authorship. Кэшируется по ключу состояния БД:
@@ -88,6 +89,10 @@ def load_data_from_db(key):
 # графа/раскладки в коде — старый graph_cache.pkl станет невалидным.
 CACHE_VERSION = 6
 
+# Блокировка дискового кэша: callback'и Dash выполняются в потоках, и параллельные
+# запись/чтение graph_cache.pkl могут повредить pickle.
+_GRAPH_CACHE_LOCK = threading.Lock()
+
 def _db_state_key():
     """Ключ состояния БД + версии кода — меняется после ETL или правок построителя.
 
@@ -105,25 +110,27 @@ def _db_state_key():
     return hashlib.md5(f"{CACHE_VERSION}:{mtime}".encode()).hexdigest()
 
 def _load_graph_from_disk(key):
-    if not GRAPH_CACHE_FILE.exists():
+    with _GRAPH_CACHE_LOCK:
+        if not GRAPH_CACHE_FILE.exists():
+            return None
+        try:
+            with open(GRAPH_CACHE_FILE, 'rb') as f:
+                saved_key, G = pickle.load(f)
+            if saved_key == key:
+                logger.info("Граф загружен из дискового кэша")
+                return G
+        except Exception as e:
+            logger.warning(f"Кэш графа повреждён, будет пересоздан: {e}")
         return None
-    try:
-        with open(GRAPH_CACHE_FILE, 'rb') as f:
-            saved_key, G = pickle.load(f)
-        if saved_key == key:
-            logger.info("Граф загружен из дискового кэша")
-            return G
-    except Exception as e:
-        logger.warning(f"Кэш графа повреждён, будет пересоздан: {e}")
-    return None
 
 def _save_graph_to_disk(key, G):
-    try:
-        with open(GRAPH_CACHE_FILE, 'wb') as f:
-            pickle.dump((key, G), f)
-        logger.info("Граф сохранён в дисковый кэш")
-    except Exception as e:
-        logger.warning(f"Не удалось сохранить кэш графа: {e}")
+    with _GRAPH_CACHE_LOCK:
+        try:
+            with open(GRAPH_CACHE_FILE, 'wb') as f:
+                pickle.dump((key, G), f)
+            logger.info("Граф сохранён в дисковый кэш")
+        except Exception as e:
+            logger.warning(f"Не удалось сохранить кэш графа: {e}")
 
 def _build_full_graph(key):
     """Полное построение графа без фильтров."""
@@ -276,7 +283,7 @@ def _layout_by_components(G):
     return positions
 
 
-@lru_cache(maxsize=8)
+@lru_cache(maxsize=2)
 def _cached_full_graph(key):
     """Полный граф: с диска, либо построение + сохранение. Кэш по ключу БД."""
     G = _load_graph_from_disk(key)
