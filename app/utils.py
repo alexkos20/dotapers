@@ -12,7 +12,7 @@ MAIN_AUTHORS = [
 ]
 BASE_URL = "https://api.openalex.org"
 DB_PATH = "pure_data.db"
-LOG_PATH = "dashboard.log"
+LOG_PATH = "app.log"
 CACHE_SIZE = 128
 
 def setup_logging():
