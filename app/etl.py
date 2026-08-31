@@ -1,7 +1,9 @@
 import os
 import sqlite3
+import time
 import requests
 from datetime import datetime
+from contextlib import contextmanager
 from utils import (
     MAIN_AUTHORS, BASE_URL, DB_PATH, logger, timeit,
     compute_hash, clear_all_caches
@@ -14,8 +16,29 @@ def get_connection():
     return conn
 
 
+@contextmanager
+def db_session():
+    """Контекст соединения с БД: commit при успехе, rollback при ошибке, close всегда.
+
+    ВАЖНО: `with sqlite3.connect(...) as conn:` НЕ закрывает соединение (только
+    коммитит/откатывает). Здесь соединение закрывается явно — иначе каждое
+    открытие (а run_etl открывает соединение на каждую работу!) держало бы
+    файловый дескриптор до сборки мусора.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def init_db():
-    with get_connection() as conn:
+    with db_session() as conn:
         cursor = conn.cursor()
         # Таблица публикаций
         cursor.execute("""
@@ -64,7 +87,7 @@ def init_db():
 
 
 def get_last_etl_time():
-    with get_connection() as conn:
+    with db_session() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT value FROM etl_metadata WHERE key = 'last_etl_run'")
         row = cursor.fetchone()
@@ -72,7 +95,7 @@ def get_last_etl_time():
 
 
 def update_etl_metadata(total_added=0, total_updated=0, total_failed=0):
-    with get_connection() as conn:
+    with db_session() as conn:
         cursor = conn.cursor()
         now = datetime.now().isoformat()
 
@@ -102,7 +125,7 @@ def _normalize_name(name):
     return ''.join(ch for ch in str(name).lower() if ch.isalnum())
 
 
-def get_author_id(display_name):
+def get_author_id(display_name, retries=3):
     """Возвращает author_id по имени, требуя точного совпадения display_name.
 
     Поиск OpenAlex возвращает кандидатов по релевантности, и первый из них может
@@ -110,51 +133,106 @@ def get_author_id(display_name):
     загрузить публикации чужого человека. Поэтому ищем нормализованное точное
     совпадение по всем кандидатам; если совпадения нет — автор пропускается, а
     в лог пишется ERROR со списком кандидатов.
+
+    Транзиентные ошибки сети/API (timeout, 5xx, 429) ретраятся с задержкой —
+    раньше одна ошибка молча выкидывала автора из прогона. Среди точных
+    совпадений с одинаковым именем (в OpenAlex бывают дубли-профили, например
+    два «Alexander Krylatov» с 71 и 1 работой) берётся профиль с наибольшим
+    числом работ — с меньшей вероятностью фейковый/неполный.
     """
     url = f"{BASE_URL}/authors"
-    params = {'search': display_name, 'select': 'id,display_name'}
     query_norm = _normalize_name(display_name)
-    try:
-        resp = requests.get(url, params=params, timeout=30)
-        if resp.status_code == 200:
+
+    for attempt in range(1, retries + 1):
+        try:
+            params = {
+                'search': display_name,
+                'select': 'id,display_name,works_count',
+                'per-page': 50,  # больше кандидатов — точное имя не теряется за пределами топ-25
+            }
+            resp = requests.get(url, params=params, timeout=30)
+            if resp.status_code == 429 or resp.status_code >= 500:
+                logger.warning(f"API {resp.status_code} для {display_name}, попытка {attempt}/{retries}")
+                if attempt < retries:
+                    time.sleep(1.5 * attempt)
+                    continue
+                break
+            if resp.status_code != 200:
+                logger.error(f"Ошибка поиска {display_name}: HTTP {resp.status_code}")
+                break
+
             data = resp.json()
             if data['meta']['count'] > 0:
                 results = data['results']
-                for author in results:
-                    if _normalize_name(author.get('display_name', '')) == query_norm:
-                        logger.info(f"Найден автор: {author['display_name']}")
-                        return author['id']
+                matches = [
+                    a for a in results
+                    if _normalize_name(a.get('display_name', '')) == query_norm
+                ]
+                if matches:
+                    best = max(matches, key=lambda a: a.get('works_count') or 0)
+                    logger.info(
+                        f"Найден автор: {best['display_name']} "
+                        f"({best['id']}, works={best.get('works_count')})"
+                    )
+                    return best['id']
                 logger.error(
                     f"Автор {display_name} не найден по точному совпадению. "
                     f"Кандидаты: {[a.get('display_name') for a in results[:5]]}"
                 )
-        logger.warning(f"Автор {display_name} не найден")
-    except Exception as e:
-        logger.error(f"Ошибка поиска {display_name}: {e}")
+            break
+        except (requests.exceptions.RequestException, ValueError, KeyError) as e:
+            logger.warning(f"Ошибка поиска {display_name} (попытка {attempt}/{retries}): {e}")
+            if attempt < retries:
+                time.sleep(1.5 * attempt)
+            else:
+                logger.error(f"Автор {display_name} не найден после {retries} попыток: {e}")
     return None
 
 
-def get_author_works(author_id):
+def get_author_works(author_id, retries=3):
+    """Все работы автора с пагинацией. Возвращает (works, complete).
+
+    complete=False означает, что часть страниц не удалось загрузить даже после
+    повторов — вызывающий код должен посчитать прогон неудачным, иначе данные
+    автора молча обрежутся (а метаданные покажут 0 ошибок).
+    """
     works = []
     url = f"{BASE_URL}/works"
     params = {'filter': f'author.id:{author_id}', 'per-page': 200}
+    complete = True
+    page = 0
 
     while url:
-        try:
-            resp = requests.get(url, params=params, timeout=30)
-            if resp.status_code != 200:
-                logger.error(f"Ошибка API: {resp.status_code}")
+        page += 1
+        fetched = False
+        for attempt in range(1, retries + 1):
+            try:
+                resp = requests.get(url, params=params, timeout=30)
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    logger.warning(f"API {resp.status_code} (стр. {page}), попытка {attempt}/{retries}")
+                    if attempt < retries:
+                        time.sleep(1.5 * attempt)
+                        continue
+                    break
+                if resp.status_code != 200:
+                    logger.error(f"Ошибка API: {resp.status_code} (стр. {page})")
+                    break
+                data = resp.json()
+                works.extend(data['results'])
+                url = data.get('next')
+                params = None
+                fetched = True
                 break
-            data = resp.json()
-            works.extend(data['results'])
-            url = data.get('next')
-            params = None
-        except Exception as e:
-            logger.error(f"Ошибка загрузки работ: {e}")
+            except (requests.exceptions.RequestException, ValueError, KeyError) as e:
+                logger.warning(f"Ошибка загрузки работ (стр. {page}, попытка {attempt}/{retries}): {e}")
+                if attempt < retries:
+                    time.sleep(1.5 * attempt)
+        if not fetched:
+            complete = False
             break
 
-    logger.info(f"Загружено {len(works)} работ")
-    return works
+    logger.info(f"Загружено {len(works)} работ (полностью: {complete})")
+    return works, complete
 
 
 def extract_work_info(work):
@@ -257,9 +335,16 @@ def run_etl():
         logger.info(f"\n--- Обработка: {author_name} ---")
         author_id = get_author_id(author_name)
         if not author_id:
+            # Автор не найден (сеть/API/неоднозначность) — считаем неудачей,
+            # иначе ETL молча «успешно» пропускает авторов и records_failed=0
+            # при неполных данных.
+            total_failed += 1
             continue
 
-        works = get_author_works(author_id)
+        works, complete = get_author_works(author_id)
+        if not complete:
+            # Часть страниц работ не загрузилась — данные автора неполные.
+            total_failed += 1
 
         for work in works:
             work_id = work['id']
@@ -267,7 +352,7 @@ def run_etl():
                 work_info = extract_work_info(work)
                 current_hash = compute_hash(work)
 
-                with get_connection() as conn:
+                with db_session() as conn:
                     cursor = conn.cursor()
                     cursor.execute(
                         "SELECT content_hash FROM publications WHERE id = ?",
@@ -305,7 +390,7 @@ def needs_etl():
     if not os.path.exists(DB_PATH):
         return True
     try:
-        with get_connection() as conn:
+        with db_session() as conn:
             pubs = pd.read_sql("SELECT COUNT(*) FROM publications", conn).iloc[0, 0]
             auth = pd.read_sql("SELECT COUNT(*) FROM authorship", conn).iloc[0, 0]
         return pubs == 0 or auth == 0
@@ -338,7 +423,7 @@ def ensure_data(force=False):
 
 def get_author_stats(author_id):
     """Возвращает статистику по автору."""
-    with get_connection() as conn:
+    with db_session() as conn:
         # Число публикаций
         pub_count = pd.read_sql(
             "SELECT COUNT(*) FROM authorship WHERE author_id = ?", conn, params=[author_id]
@@ -361,7 +446,7 @@ def get_author_stats(author_id):
 
 def get_author_publications(author_id):
     """Список публикаций автора."""
-    with get_connection() as conn:
+    with db_session() as conn:
         df = pd.read_sql("""
             SELECT p.id, p.title, p.publication_year, p.cited_by_count, p.journal
             FROM authorship a 
@@ -373,7 +458,7 @@ def get_author_publications(author_id):
 
 def get_author_coauthors(author_id):
     """Список соавторов с числом совместных работ."""
-    with get_connection() as conn:
+    with db_session() as conn:
         df = pd.read_sql("""
             SELECT a2_info.id, a2_info.name, COUNT(*) as joint_works
             FROM authorship a1
@@ -387,7 +472,7 @@ def get_author_coauthors(author_id):
 
 def get_author_topics(author_id):
     """Топ-5 тем автора."""
-    with get_connection() as conn:
+    with db_session() as conn:
         df = pd.read_sql("""
             SELECT p.topics
             FROM authorship a 
@@ -409,7 +494,7 @@ def get_author_topics(author_id):
 
 def get_author_name(author_id):
     """Возвращает имя автора по id (или сам id, если не найден)."""
-    with get_connection() as conn:
+    with db_session() as conn:
         df = pd.read_sql("SELECT name FROM authors WHERE id = ?", conn, params=[author_id])
         return df.iloc[0]['name'] if not df.empty else author_id
 

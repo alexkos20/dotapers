@@ -3,6 +3,7 @@ import math
 import pickle
 import sqlite3
 import threading
+import copy
 from pathlib import Path
 
 import dash
@@ -15,7 +16,7 @@ import networkx as nx
 from collections import Counter
 from functools import lru_cache
 from utils import MAIN_AUTHORS, DB_PATH, GRAPH_CACHE_FILE, logger, timeit
-from etl import get_connection
+from etl import db_session
 
 # Регистрируем страницу
 dash.register_page(__name__, path='/', name='Сеть соавторства')
@@ -65,7 +66,7 @@ def load_data_from_db(key):
     """Загрузка публикаций и authorship. Кэшируется по ключу состояния БД:
     после ETL ключ меняется, и данные читаются из БД заново (иначе после
     пересборки графа вернулись бы старые — пустые — таблицы из кэша)."""
-    with get_connection() as conn:
+    with db_session() as conn:
         try:
             df_pubs = pd.read_sql("SELECT * FROM publications", conn)
             df_auth = pd.read_sql("SELECT * FROM authorship", conn)
@@ -146,7 +147,7 @@ def _build_full_graph(key):
     # это разные люди, и они не должны сливаться в один узел (иначе счётчики
     # публикаций/цитирований суммируются, а клик ведёт на чужой профиль).
     author_names = {}
-    with get_connection() as conn:
+    with db_session() as conn:
         df_authors = pd.read_sql("SELECT id, name FROM authors", conn)
         author_names = dict(zip(df_authors['id'], df_authors['name']))
 
@@ -499,8 +500,10 @@ def update_graph(min_pubs, min_cites):
     G = build_graph(min_pubs, min_cites)
     nodes, edges = graph_to_cytoscape_elements(G)
 
-    total_papers = sum(G.nodes[node].get('publications', 0) for node in G.nodes())
-    total_citations = sum(G.nodes[node].get('total_citations', 0) for node in G.nodes())
+    # Статистика — по УНИКАЛЬНЫМ публикациям, а не по сумме по авторам:
+    # раньше соавторская статья считалась по разу на каждого автора
+    # (273 уникальных работ в БД показывались как 771).
+    total_papers, total_citations = _graph_stats(G)
 
     return (
         nodes + edges,
@@ -510,12 +513,36 @@ def update_graph(min_pubs, min_cites):
         f"{total_citations:,}"
     )
 
+
+def _graph_stats(G):
+    """Число уникальных публикаций и сумма их цитирований для узлов графа G.
+
+    Публикация учитывается, если хотя бы один из её авторов присутствует в
+    графе (после применения фильтров слайдеров).
+    """
+    if G.number_of_nodes() == 0:
+        return 0, 0
+    key = _db_state_key()
+    df_pubs, df_auth = load_data_from_db(key)
+    if df_pubs.empty or df_auth.empty:
+        return 0, 0
+    node_ids = set(G.nodes())
+    auth_in_graph = df_auth[df_auth['author_id'].isin(node_ids)]
+    pub_ids = set(auth_in_graph['publication_id'])
+    total_papers = len(pub_ids)
+    total_citations = int(df_pubs[df_pubs['id'].isin(pub_ids)]['cited_by_count'].sum())
+    return total_papers, total_citations
+
 @callback(
     [Output("coauthorship-graph", "stylesheet")],
     [Input("show-labels", "value")]
 )
 def update_labels(show_labels):
-    updated_stylesheet = STYLESHEET.copy()
+    # Глубокая копия: STYLESHEET — глобальная константа. При поверхностной
+    # копии (.copy()) внутренние dict'ы общие, и правка label/font-size мутировала
+    # глобальный стиль: после включения полных имён и перехода на другую страницу
+    # граф рисовался с полными именами при выключенном чекбоксе.
+    updated_stylesheet = copy.deepcopy(STYLESHEET)
     for style in updated_stylesheet:
         if style.get('selector') == 'node':
             if show_labels:
@@ -524,7 +551,9 @@ def update_labels(show_labels):
             else:
                 style['style']['label'] = 'data(label)'
                 style['style']['font-size'] = '10px'
-    return [updated_stylesheet]
+    # Output('stylesheet') ждёт ПЛОСКИЙ список стилей; раньше двойная обёртка
+    # [updated_stylesheet] ломала применение стилей в Cytoscape.
+    return updated_stylesheet
 
 @callback(
     Output("node-info", "children"),

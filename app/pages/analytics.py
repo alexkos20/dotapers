@@ -7,7 +7,7 @@ import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 import pandas as pd
 from utils import logger, timeit
-from etl import get_connection
+from etl import db_session
 
 dash.register_page(__name__, path='/analytics', name='Аналитика')
 
@@ -44,7 +44,7 @@ layout = html.Div([
 )
 @timeit
 def load_global_topics(_):
-    with get_connection() as conn:
+    with db_session() as conn:
         df_pubs = pd.read_sql("SELECT topics FROM publications", conn)
     topics = []
     for topics_str in df_pubs['topics'].dropna():
@@ -89,7 +89,7 @@ def load_global_topics(_):
 )
 @timeit
 def load_global_trend(_):
-    with get_connection() as conn:
+    with db_session() as conn:
         df_pubs = pd.read_sql("SELECT publication_year FROM publications", conn)
     yearly = df_pubs['publication_year'].dropna()
     if yearly.empty:
@@ -124,7 +124,7 @@ def load_global_trend(_):
 )
 @timeit
 def load_top_authors(_):
-    with get_connection() as conn:
+    with db_session() as conn:
         query = """
             SELECT a.name, COUNT(au.publication_id) as pub_count
             FROM authors a
