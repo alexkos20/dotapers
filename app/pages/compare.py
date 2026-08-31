@@ -6,7 +6,7 @@ from dash import html, dcc, callback, Input, Output
 import dash_bootstrap_components as dbc
 import pandas as pd
 from utils import logger
-from etl import get_connection, get_author_stats, get_author_name, init_db
+from etl import db_session, get_author_stats, get_author_name, init_db
 
 dash.register_page(__name__, path='/compare', name='Сравнение авторов')
 
@@ -14,7 +14,7 @@ dash.register_page(__name__, path='/compare', name='Сравнение авто�
 def load_authors_list():
     """Возвращает список словарей для options dropdown."""
     init_db()  # гарантируем, что таблицы существуют (иначе первый запуск упадёт)
-    with get_connection() as conn:
+    with db_session() as conn:
         df = pd.read_sql("SELECT id, name FROM authors ORDER BY name", conn)
     return [{'label': row['name'], 'value': row['id']} for _, row in df.iterrows()]
 
