@@ -551,9 +551,11 @@ def update_labels(show_labels):
             else:
                 style['style']['label'] = 'data(label)'
                 style['style']['font-size'] = '10px'
-    # Output('stylesheet') ждёт ПЛОСКИЙ список стилей; раньше двойная обёртка
-    # [updated_stylesheet] ломала применение стилей в Cytoscape.
-    return updated_stylesheet
+    # Output объявлен списком [Output(...)] — Dash ждёт ответ списком из одного
+    # элемента, самим элементом является плоский stylesheet (два dict'а: node+edge).
+    # Возврат плоского списка напрямую (без внешнего списка) Dash трактует как
+    # 2 значения для 1 выхода → SchemaLengthValidationError → 500 → чекбокс не работает.
+    return [updated_stylesheet]
 
 @callback(
     Output("node-info", "children"),
